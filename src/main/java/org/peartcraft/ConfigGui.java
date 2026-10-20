@@ -14,6 +14,7 @@ import javafx.scene.layout.*;
 import javafx.stage.Stage;
 import net.sandrohc.schematic4j.schematic.LitematicaSchematic;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -61,7 +62,12 @@ public class ConfigGui extends Application {
 
         // Declare selected file property
         ObjectProperty<LitematicaSchematic> selectedFile = new SimpleObjectProperty<>();
+
         Label fileLabel = new Label("No file selected");
+        // Keep the main window compact. Region selection lives in a separate dialog.
+        Set<Integer> selectedRegionIndices = new LinkedHashSet<>();
+        Button chooseRegions = new Button("Choose Regions...");
+        chooseRegions.setDisable(true);
 
         // Coordinates
         Label section1 = new Label("Coordinates");
@@ -120,6 +126,9 @@ public class ConfigGui extends Application {
         ObservableList<String> blockList = FXCollections.observableArrayList();
         blockList.setAll(blockSet);
         blockListView.setItems(blockList);
+        blockListView.setPrefHeight(85);
+        blockListView.setMinHeight(75);
+        blockListView.setMaxHeight(95);
 
         blockInput.setOnAction(e -> {
             String input = blockInput.getText().trim().toLowerCase();
@@ -140,7 +149,76 @@ public class ConfigGui extends Application {
             if (litematic != null) {
                 selectedFile.set(litematic);
                 fileLabel.setText(litematic.name());
-                submitButton.setDisable(false);
+                selectedRegionIndices.clear();
+                LitematicaSchematic.Region[] regions = litematic.regions();
+                for (int i = 0; i < regions.length; i++) {
+                    selectedRegionIndices.add(i);
+                }
+                chooseRegions.setDisable(regions.length == 0);
+                chooseRegions.setText("Regions (" + regions.length + "/" + regions.length + ")");
+                submitButton.setDisable(regions.length == 0);
+            }
+        });
+
+        chooseRegions.setOnAction(e -> {
+            LitematicaSchematic litematic = selectedFile.get();
+            if (litematic == null) return;
+            LitematicaSchematic.Region[] regions = litematic.regions();
+
+            Dialog<ButtonType> dialog = new Dialog<>();
+            dialog.initOwner(primaryStage);
+            dialog.setTitle("Choose Regions");
+            dialog.setHeaderText("Choose which Litematica regions to export");
+
+            List<CheckBox> options = new ArrayList<>();
+            VBox choices = new VBox(7);
+            for (int i = 0; i < regions.length; i++) {
+                LitematicaSchematic.Region region = regions[i];
+                String name = region.name == null || region.name.isBlank()
+                        ? "Region " + (i + 1) : region.name;
+                CheckBox option = new CheckBox(String.format(
+                        "%d. %s (%d x %d x %d)",
+                        i + 1, name, Math.abs((long) region.size.x),
+                        Math.abs((long) region.size.y), Math.abs((long) region.size.z)));
+                option.setTooltip(new Tooltip(String.format(
+                        "Relative origin: (%d, %d, %d) | Signed size: (%d, %d, %d)",
+                        region.position.x, region.position.y, region.position.z,
+                        region.size.x, region.size.y, region.size.z)));
+                option.setSelected(selectedRegionIndices.contains(i));
+                options.add(option);
+                choices.getChildren().add(option);
+            }
+
+            Button selectAll = new Button("Select all");
+            Button selectNone = new Button("Select none");
+            selectAll.setOnAction(event -> options.forEach(option -> option.setSelected(true)));
+            selectNone.setOnAction(event -> options.forEach(option -> option.setSelected(false)));
+
+            ScrollPane regionScroll = new ScrollPane(choices);
+            regionScroll.setFitToWidth(true);
+            regionScroll.setPrefViewportWidth(440);
+            regionScroll.setPrefViewportHeight(190);
+
+            VBox content = new VBox(10, new Label(
+                    "Unselected regions are skipped. World coordinates stay unchanged."),
+                    new HBox(8, selectAll, selectNone), regionScroll);
+            dialog.getDialogPane().setContent(content);
+            dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+
+            Button ok = (Button) dialog.getDialogPane().lookupButton(ButtonType.OK);
+            Runnable updateOk = () -> ok.setDisable(
+                    options.stream().noneMatch(CheckBox::isSelected));
+            options.forEach(option -> option.selectedProperty().addListener(
+                    (obs, before, after) -> updateOk.run()));
+            updateOk.run();
+
+            if (dialog.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
+                selectedRegionIndices.clear();
+                for (int i = 0; i < options.size(); i++) {
+                    if (options.get(i).isSelected()) selectedRegionIndices.add(i);
+                }
+                chooseRegions.setText(String.format("Regions (%d/%d)",
+                        selectedRegionIndices.size(), regions.length));
             }
         });
 
@@ -157,6 +235,12 @@ public class ConfigGui extends Application {
                 String dimension = dimensionDropdown.getValue();
                 String provider = providerDropdown.getValue();
 
+                if (selectedRegionIndices.isEmpty()) {
+                    new Alert(Alert.AlertType.WARNING,
+                            "Select at least one region to export.").showAndWait();
+                    return;
+                }
+
                 // Persist inputs for next session
                 prefs.put("x1", x1Field.getText());
                 prefs.put("y1", y1Field.getText());
@@ -169,7 +253,8 @@ public class ConfigGui extends Application {
 
                 Set<String> newBlockSet = blockSet.stream().map(s -> BLOCK_PREFIX + s).collect(Collectors.toCollection(LinkedHashSet::new));
 
-                ConfigData config = new ConfigData(x1, y1, z1, x2, y2, z2, dimension, provider, newBlockSet, selectedFile.get());
+                ConfigData config = new ConfigData(x1, y1, z1, x2, y2, z2,
+                        dimension, provider, newBlockSet, selectedFile.get(), selectedRegionIndices);
                 future.complete(config);
                 primaryStage.close();
             } catch (NumberFormatException ex) {
@@ -177,9 +262,11 @@ public class ConfigGui extends Application {
             }
         });
 
-        VBox fileSection = new VBox(5, new Label("Litematic File"), fileLabel, loadLitematic);
+        VBox fileSection = new VBox(5, new Label("Litematic File"), fileLabel,
+                new HBox(8, loadLitematic, chooseRegions));
 
-        VBox root = new VBox(15, section1, coordsBox, section2, providerDropdown, section3, dimensionDropdown, section4, blockBox, fileSection, submitButton);
+        VBox root = new VBox(15, section1, coordsBox, section2, providerDropdown,
+                section3, dimensionDropdown, section4, blockBox, fileSection, submitButton);
         root.setPadding(new Insets(20));
 
         Scene scene = new Scene(root, 800, 600);
